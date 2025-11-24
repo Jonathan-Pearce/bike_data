@@ -1,65 +1,69 @@
 import argparse
-import sys
 from pathlib import Path
+import sys
 
 import pandas as pd
 
 
 def gather_csv_files(src: Path, recursive: bool = False, pattern: str = "*.csv"):
-    """Find all CSV files in a directory."""
-    if recursive:
-        return sorted(src.rglob(pattern))
-    return sorted(src.glob(pattern))
+    return sorted(src.rglob(pattern) if recursive else src.glob(pattern))
 
 
-def merge_csv_files(files: list[Path], output: Path, output_format: str = "csv", compression: str = "snappy"):
-    """Concatenate multiple CSV files into one CSV or Parquet file."""
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Read as strings originally, trim whitespace for string-like columns
+    for col in df.columns:
+        if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            df[col] = df[col].astype(str).str.strip().replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+
+    # Keep station codes as string (consistent) to avoid pyarrow int conversion errors
+    for c in ("start_station_code", "end_station_code"):
+        if c in df.columns:
+            df[c] = df[c].astype("string")
+
+    # Convert duration_sec to nullable integer if sensible
+    if "duration_sec" in df.columns:
+        df["duration_sec"] = pd.to_numeric(df["duration_sec"], errors="coerce").astype("Int64")
+
+    # Convert is_member (1/0) to pandas nullable boolean
+    if "is_member" in df.columns:
+        s = pd.to_numeric(df["is_member"], errors="coerce").fillna(0).astype("Int64")
+        df["is_member"] = (s == 1).astype("boolean")
+
+    return df
+
+
+def merge_csv_files(src: Path, out: Path, recursive: bool = False, compression: str = "snappy"):
+    files = gather_csv_files(src, recursive=recursive)
     if not files:
-        print("No CSV files found to merge.", file=sys.stderr)
-        sys.exit(0)
+        print("No CSV files found.", file=sys.stderr)
+        return
 
-    print(f"Found {len(files)} CSV files to merge:")
-    for f in files:
-        print(f"  - {f.name}")
-
-    # Read and concatenate all files
     dfs = []
     for f in files:
-        print(f"Reading {f.name}...")
-        df = pd.read_csv(f)
+        print(f"Reading {f}...")
+        df = pd.read_csv(f, dtype=str, low_memory=False)
+        df = normalize_df(df)
         dfs.append(df)
 
     print(f"Concatenating {len(dfs)} DataFrames...")
-    merged = pd.concat(dfs, ignore_index=True)
+    merged = pd.concat(dfs, ignore_index=True, sort=False)
 
-    print(f"Writing merged file: {output}")
-    print(f"  Total rows: {len(merged):,}")
-    print(f"  Columns: {', '.join(merged.columns)}")
-    
-    if output_format == "parquet":
-        merged.to_parquet(output, engine="pyarrow", compression=compression, index=False)
-    else:
-        merged.to_csv(output, index=False)
-    
-    print(f"Merge complete: {output}")
+    # Final normalization pass to ensure consistent dtypes across concatenated frames
+    merged = normalize_df(merged)
+
+    print(f"Writing merged Parquet: {out}  (rows: {len(merged):,})")
+    merged.to_parquet(out, engine="pyarrow", compression=compression, index=False)
+    print("Done.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Merge/stack CSV files in a folder")
-    parser.add_argument("--src", required=False,
-                        default="/workspaces/bike_data/data/montreal/2019/raw/data_parts",
-                        help="Source folder containing CSV files")
-    parser.add_argument("--out", required=False,
-                        default="/workspaces/bike_data/data/montreal/2019/raw/merged_2019.csv",
-                        help="Output merged file path")
-    parser.add_argument("--pattern", default="*.csv",
-                        help="File pattern to match (default: *.csv)")
-    parser.add_argument("--recursive", "-r", action="store_true",
-                        help="Search subdirectories recursively")
-    parser.add_argument("--format", choices=["csv", "parquet"], default="csv",
-                        help="Output format (csv or parquet)")
-    parser.add_argument("--compression", default="snappy",
-                        help="Parquet compression (snappy, gzip, brotli, none)")
+    parser = argparse.ArgumentParser(description="Merge/stack CSV files and write Parquet")
+    parser.add_argument("--src", default="/workspaces/bike_data/data/montreal/2019/raw/data_parts",
+                        help="Source folder with CSV files")
+    parser.add_argument("--out", default="/workspaces/bike_data/data/montreal/2019/raw/merged_2019.parquet",
+                        help="Output Parquet file")
+    parser.add_argument("--recursive", "-r", action="store_true", help="Search subdirectories")
+    parser.add_argument("--compression", default="snappy", help="Parquet compression")
     args = parser.parse_args()
 
     src = Path(args.src)
@@ -69,10 +73,8 @@ def main():
         print(f"Source directory not found: {src}", file=sys.stderr)
         sys.exit(2)
 
-    files = gather_csv_files(src, recursive=args.recursive, pattern=args.pattern)
-    
     try:
-        merge_csv_files(files, out, output_format=args.format, compression=args.compression)
+        merge_csv_files(src, out, recursive=args.recursive, compression=args.compression)
     except Exception as e:
         print(f"Error during merge: {e}", file=sys.stderr)
         sys.exit(1)
