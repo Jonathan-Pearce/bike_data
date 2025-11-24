@@ -10,17 +10,17 @@ def gather_csv_files(src: Path, recursive: bool = False, pattern: str = "*.csv")
 
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    # Read as strings originally, trim whitespace for string-like columns
+    # Trim whitespace for string-like columns and normalize common nulls
     for col in df.columns:
         if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
             df[col] = df[col].astype(str).str.strip().replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 
-    # Keep station codes as string (consistent) to avoid pyarrow int conversion errors
+    # Convert station codes to nullable 32-bit integers (Int32)
     for c in ("start_station_code", "end_station_code"):
         if c in df.columns:
-            df[c] = df[c].astype("string")
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int32")
 
-    # Convert duration_sec to nullable integer if sensible
+    # Convert duration_sec to nullable integer if sensible (use Int64 for larger ranges)
     if "duration_sec" in df.columns:
         df["duration_sec"] = pd.to_numeric(df["duration_sec"], errors="coerce").astype("Int64")
 
@@ -41,6 +41,7 @@ def merge_csv_files(src: Path, out: Path, recursive: bool = False, compression: 
     dfs = []
     for f in files:
         print(f"Reading {f}...")
+        # read as strings to avoid mixed-type inference issues
         df = pd.read_csv(f, dtype=str, low_memory=False)
         df = normalize_df(df)
         dfs.append(df)
@@ -50,6 +51,12 @@ def merge_csv_files(src: Path, out: Path, recursive: bool = False, compression: 
 
     # Final normalization pass to ensure consistent dtypes across concatenated frames
     merged = normalize_df(merged)
+
+    # Ensure station code dtypes are exactly int32-compatible before writing
+    for c in ("start_station_code", "end_station_code"):
+        if c in merged.columns:
+            # cast to pyarrow-compatible int32 by keeping pandas nullable Int32
+            merged[c] = merged[c].astype("Int32")
 
     print(f"Writing merged Parquet: {out}  (rows: {len(merged):,})")
     merged.to_parquet(out, engine="pyarrow", compression=compression, index=False)
