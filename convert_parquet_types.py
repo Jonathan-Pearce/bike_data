@@ -9,7 +9,7 @@ FALSE_SET = {"0", "false", "f", "no", "n", "non_member", "not_member"}
 
 
 def to_nullable_boolean(series: pd.Series) -> pd.Series:
-    # If already boolean dtype (including pandas 'boolean'), just return cast
+    # If already boolean or integer dtype, cast to pandas nullable boolean
     if pd.api.types.is_bool_dtype(series) or pd.api.types.is_integer_dtype(series):
         return series.astype("boolean")
     s = series.astype(str).str.strip().str.lower().replace({"nan": None, "none": None})
@@ -20,15 +20,11 @@ def to_nullable_boolean(series: pd.Series) -> pd.Series:
 def convert_parquet(path_in: str, path_out: str) -> None:
     df = pd.read_parquet(path_in)
 
-    if "start_date" in df.columns:
-        df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    if "end_date" in df.columns:
-        df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
     if "is_member" in df.columns:
         df["is_member"] = to_nullable_boolean(df["is_member"])
 
     df.to_parquet(path_out, engine="pyarrow", index=False)
-    # print resulting dtypes
+
     for col, dtype in df.dtypes.items():
         print(f"{col}: {dtype}")
 
